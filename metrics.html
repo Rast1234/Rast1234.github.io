@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>&gcy;&ocy;&tcy;&ocy;&vcy;&icy;&mcy; &mcy;&iecy;&tcy;&rcy;&icy;&kcy;&icy;</title>
+        <style>
+</style>
+        
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item { list-style-type: none; } .task-list-item-checkbox { margin-left: -20px; vertical-align: middle; }
+</style>
+        
+        
+        
+    </head>
+    <body class="vscode-body vscode-light">
+        <h1 id="готовим-метрики">готовим метрики</h1>
+<h1 id="обзор">обзор</h1>
+<h2 id="метрики-vs-логи">метрики vs логи</h2>
+<p><strong>Логи</strong> - точность. на каждое событие собираем инфу. если сагрегировать, можно посмотреть общую картину, и потом вытащить из нее детали. но отправка логов на каждый чих плохо масштабируется. трафик логов зависит от трафика приложения.</p>
+<p><strong>Метрики</strong> - общая картина, мы собираем не все детали, а сразу какой-то агрегат. видно общую картину, но в детали провалиться нельзя. зато масштабируется хорошо. если надо детали - думаем какие и добавляем понемногу. трафик метрик зависит от количества метрик и периодичности сбора.</p>
+<blockquote>
+<p>Пишем все и потом думаем (ценой трафика) vs думаем и пишем только что надо (ценой потери деталей)</p>
+</blockquote>
+<p><a href="https://grafana.com/blog/2016/01/05/logs-and-metrics-and-graphs-oh-my/">Logs and Metrics and Graphs, Oh My!</a></p>
+<h2 id="push-vs-pull">Push vs Pull</h2>
+<p><strong>Push</strong> - как SQL: произошло событие - отправляем. Очевидно, можно батчить. С ним все понятно.</p>
+<p><strong>Pull</strong> интереснее:</p>
+<ul>
+<li>кто-то периодически приходит и собирает данные</li>
+<li>приложения их выставляют и хранят в памяти</li>
+<li>приложения вынуждены агрегировать, что уменьшает нагрузку - нас не интересуют единичные события, потому что очень быстро этих данных становится слишком дофига</li>
+<li>есть централизованный контроль над сбором. можно открутить интервал сбора и уменьшить всю нагрузку: трафик, хранение, память, процессор</li>
+<li><strong>проще дебажить</strong></li>
+<li>заодно проверяем живо ли приложение</li>
+</ul>
+<h2 id="tsdb-time-series-database">TSDB (time series database)</h2>
+<p>особенности tsdb - хранение временнЫх рядов (однотипное изменение во времени). удобно через равные интервалы. реляционка по минимуму. типы данных ограничены. оптимизация на постоянную непрерывную запись. можно с периодическим сжатием.</p>
+<h1 id="архитектура-сбора-метрик-точка-way">Архитектура сбора метрик, Точка way</h1>
+<h2 id="простой-путь">простой путь</h2>
+<ul>
+<li>выставляем страничку с plaintext по HTTP: <code>GET /metrics</code></li>
+<li>скрапер (сам prometheus) приходит раз в интервал и читает то, что есть</li>
+<li>наши метрики остаются у нас в памяти! мы их дополняем. хотя если хочется, можно все сбрасывать (как будто у нас забрали батч) - но так не надо делать. <strong>Идея в том что прометей собирает срез во времени и потом его средствами мы смотрим на изменения</strong></li>
+</ul>
+<h2 id="альтернативные-способы">альтернативные способы</h2>
+<ul>
+<li><strong>telegraf</strong> - конфигурите его на сбор метрик любым удобным способом, он их как-то может перелопатить, а с него уже заберет prometheus</li>
+<li>приложение само пишет в формате <strong>statsd</strong>. потом statsd-exporter выставляет для prometheus. это для периодических задач типа крона или если вы в закрытой сети. statsd-exporter уже поднят.</li>
+</ul>
+<h2 id="prometheus">prometheus</h2>
+<p>кратковременное хранилище метрик (&lt;= 6 часов) и алерты</p>
+<p>по одному на слой (stage, pre, prod)</p>
+<p>приходит раз в 30 секунд</p>
+<h2 id="clickhouse">clickhouse</h2>
+<p>долговременное хранилище метрик (неделя?)</p>
+<p>один общий на все слои</p>
+<blockquote>
+<p>для графаны прикидывается как еще один prometheus</p>
+</blockquote>
+<h2 id="consul">consul</h2>
+<p>регистрируемся в консуле с тегом metrics - к нам будет приходить прометей</p>
+<h1 id="prometheus-1">Prometheus</h1>
+<p><strong>Очень важный момент:</strong> метрики не про точность, а про усредненные значения. есть много операций и тонкостей, при которых данные теряют точность. за всем не уследишь, поэтому считаем априори что данные не на 100% точные. для биллинга не подходит, а для примерных оценок состояния систем - вполне.</p>
+<h2 id="формат">Формат</h2>
+<blockquote>
+<pre><code class="language-python"><div><span class="hljs-comment"># HELP api_http_requests_total Requests made to public API</span>
+<span class="hljs-comment"># TYPE api_http_requests_total counter</span>
+api_http_requests_total{method=<span class="hljs-string">&quot;POST&quot;</span>, url=<span class="hljs-string">&quot;/messages&quot;</span>} <span class="hljs-number">1</span>
+api_http_requests_total{method=<span class="hljs-string">&quot;GET&quot;</span>, url=<span class="hljs-string">&quot;/messages&quot;</span>} <span class="hljs-number">3</span>
+api_http_requests_total{method=<span class="hljs-string">&quot;POST&quot;</span>, url=<span class="hljs-string">&quot;/login&quot;</span>} <span class="hljs-number">2</span>
+</div></code></pre>
+</blockquote>
+<ul>
+<li>описание для помощи человекам</li>
+<li>тип метрики (разберем ниже)</li>
+<li>имя метрики</li>
+<li>набор key-value лейблов (у меня привычка называть их тегами)</li>
+<li>значение (64-bit float aka double)</li>
+<li>после сбора в БД добавляется еще timestamp</li>
+</ul>
+<blockquote>
+<p>имя - на самом деле тоже лейбл <code>__name__</code></p>
+</blockquote>
+<p><a href="https://prometheus.io/docs/practices/naming/">Практики именования</a></p>
+<p>хранение работает так:</p>
+<ul>
+<li>все лейблы описывают собой time series (временной ряд)</li>
+<li>в ряду лежат значения <code>[(timestamp, value), ...]</code></li>
+</ul>
+<blockquote>
+<p>Хранятся double-ы в разрезе времени. Никаких строк. Никаких пар и дополнительной инфы. Только числа. Лейблы - для агрегации, в них не должно быть уникальных значений.</p>
+</blockquote>
+<h2 id="кардинальность">Кардинальность</h2>
+<p>Cмена значения лейбла - это уже новый временной ряд. Поэтому не надо ими злоупотреблять. Хороший лейбл ограничен в возможных значениях. то есть целиком <code>user-agent</code> плохо, а вот название и мажорная версия браузера - ОК. Юзернейм если их сотни - сомнительно, а если их десятки - ок (api клиенты сервиса например)</p>
+<p>Перемножаем все возможные значения всех лейблов. 2 HTTP метода, 7 урлов, 5 реплик, 3 семейства ответов, 4 браузера. 840 временных рядов! ну то есть это как 840 таблиц в sql. Прометей справляется с десятками миллионов рядов, но комбинаторный взрыв можно устроить очень быстро.</p>
+<blockquote>
+<p>В целом, не стесняясь пишите то, что вам надо, но не злодействуйте. Если будет жрать ресурсы - придут девопсы и попросят что-нибудь отрезать</p>
+</blockquote>
+<p><a href="https://www.robustperception.io/cardinality-is-key">Cardinality is key</a></p>
+<h1 id="типы-метрик">Типы метрик</h1>
+<p>Под капотом разницы нет. Это чисто для человеков, чтобы было проще работать.</p>
+<h2 id="counter">Counter</h2>
+<p><strong>Счетчик</strong> - монотонно возрастающее число. Никогда не убывает! Может быть сброшен в ноль, например при рестартах. Это важно тк есть специальные функции которые это учитывают</p>
+<p>API: <code>increase()</code>, <code>add(x)</code></p>
+<blockquote>
+<p>Количество обработаных заросов, ошибок, задач</p>
+</blockquote>
+<p>Как узнать сколько запросов было за единицу времени, когда у нас тупо одно число? - посмотреть на дельту, тк прометей сохраняет снимки этого числа каждые N секунд. Ну и понадобится дополнительный костыль если счетчик вдруг сбросился в ноль.</p>
+<h2 id="gauge">Gauge</h2>
+<p><strong>&quot;Стрелка&quot;</strong> - число которое может гулять вверх-вниз</p>
+<p>API: <code>setValue(x)</code>, <code>increase/decrease</code></p>
+<blockquote>
+<p>Количество текущих запросов прямо сейчас, занятая память, свободное место на диске</p>
+</blockquote>
+<p>Поскольку эта штука не монотонная, для нее не сработают некоторые матановые фокусы, то есть она немного более ограничена в использовании.</p>
+<h1 id="histogram">Histogram</h1>
+<p><strong>Гистограмма</strong> - агрегация чего-то самим приложением, когда нам интересно знать <strong>распределение</strong> величин по <strong>заранее определенным</strong> группам (buckets)</p>
+<p>Например мы хотим знать длительность HTTP запросов. Определимся какое время считать хорошим, какое плохим, и насколько детально мы хотим знать распределение. Можно сказать, <strong>качественное распределение</strong>:</p>
+<ul>
+<li>0.1 сек или меньше - хороший запрос, таких ожидаем дофига</li>
+<li>0.1 - 1 - сойдет, но лучше бы знать что такие есть</li>
+<li>1 - 5 - подозрительно, может посмотрим если таких окажется много</li>
+<li>больше - вообще плохо</li>
+</ul>
+<p>Пришел запрос, померяли время X, и добавили в гистограмму:</p>
+<ul>
+<li>+1 в соответствующую группу</li>
+<li>+X в суммарное время</li>
+</ul>
+<p>API: <code>observe(x)</code></p>
+<pre><code class="language-python"><div>http_duration_bucket{url=<span class="hljs-string">&quot;/&quot;</span>, le=<span class="hljs-string">&quot;0.1&quot;</span>} <span class="hljs-number">100</span>
+http_duration_bucket{url=<span class="hljs-string">&quot;/&quot;</span>, le=<span class="hljs-string">&quot;1&quot;</span>} <span class="hljs-number">30</span>
+http_duration_bucket{url=<span class="hljs-string">&quot;/&quot;</span>, le=<span class="hljs-string">&quot;5&quot;</span>} <span class="hljs-number">10</span>
+http_duration_bucket{url=<span class="hljs-string">&quot;/&quot;</span>, le=<span class="hljs-string">&quot;+Inf&quot;</span>} <span class="hljs-number">1</span>
+
+http_duration_sum{url=<span class="hljs-string">&quot;/&quot;</span>} <span class="hljs-number">152.7625769</span>  <span class="hljs-comment"># это бонусом идет сумма всех значений</span>
+http_duration_count{url=<span class="hljs-string">&quot;/&quot;</span>} <span class="hljs-number">141</span>  <span class="hljs-comment"># это количество значений, т.е. counter который всегда делает +1</span>
+</div></code></pre>
+<blockquote>
+<p><code>le</code> - просто тег, который генерируется из наших бакетов. и никакой романтики...</p>
+</blockquote>
+<p>Гистограммы можно удобно и точно агрегировать в квантили (см. ниже), но это делается на сервере.</p>
+<h1 id="summary">Summary</h1>
+<p><strong>Сводка</strong> - на первый взгляд, похоже на гистограмму, но на самом деле это результат агрегации гистограммы. Она выдает квантили, можно сказать <strong>количественное распределение</strong>, когда мы заранее не можем определить бакеты.</p>
+<p>Например, мы заранее не знаем что считать хорошим временем для запроса, а что плохим. Поэтому просто закинем время в саммари и потом посмотрим, во что впишутся 95% запросов. Ну и 50%, и 99% тоже.</p>
+<p>Пришел запрос, померяли время X, добавили в саммари:</p>
+<ul>
+<li>+1 в счетчик</li>
+<li>X закинули во множество значений</li>
+<li>пересчитали квантили</li>
+<li>иногда еще сдвинули окно (выкинули из множества старые значения) чтобы не расходовать память бесконечно - тут можно применять разные подходы</li>
+</ul>
+<p>API: <code>observe(x)</code></p>
+<pre><code class="language-python"><div>http_duration_summary{quantile=<span class="hljs-string">&quot;1&quot;</span>} <span class="hljs-number">100</span>
+http_duration_summary{quantile=<span class="hljs-string">&quot;0.99&quot;</span>} <span class="hljs-number">4.300226799</span>
+http_duration_summary{quantile=<span class="hljs-string">&quot;0.95&quot;</span>} <span class="hljs-number">2.204090024</span>
+http_duration_summary{quantile=<span class="hljs-string">&quot;0.5&quot;</span>} <span class="hljs-number">0.073790038</span>
+http_duration_summary{quantile=<span class="hljs-string">&quot;0.1&quot;</span>} <span class="hljs-number">0.018127115</span>
+
+http_duration_summary_sum <span class="hljs-number">152.7625769</span>  <span class="hljs-comment"># как у гистограммы, сумма всех значений</span>
+http_duration_summary_count <span class="hljs-number">141</span>  <span class="hljs-comment"># и количество значений</span>
+</div></code></pre>
+<p>Сводки нельзя просто так агрегировать в лоб (см. ниже), но вообще можно, если вы думаете головой. С потерей точности. А еще они висят в памяти приложения, так как нужно запоминать значения за какой-то промежуток времени.</p>
+<h1 id="запросы">Запросы</h1>
+<pre><code class="language-python"><div>http_requests_total
+http_requests_total{job=<span class="hljs-string">&quot;prometheus&quot;</span>,group=<span class="hljs-string">&quot;canary&quot;</span>}
+http_requests_total{job=<span class="hljs-string">&quot;prometheus&quot;</span>,group=<span class="hljs-string">&quot;canary&quot;</span>}[<span class="hljs-number">1</span>m]
+</div></code></pre>
+<h2 id="простые-типы">Простые типы</h2>
+<p>Есть строки - чтобы писать лейблы и значения. Есть числа, они могут быть значением лейбла, могут участвовать в функциях.</p>
+<h2 id="тип-instant-vector">Тип <code>instant vector</code></h2>
+<p>Массив из [одного значения на единицу времени]. Это то, что рисуется на графиках. Другой тип надо привести к этому какой-нибудь функцией (агрегировать).</p>
+<h2 id="селекторы-instant-vetcor-ов">Селекторы instant vetcor-ов</h2>
+<p>Метрики и лейблы можно матчить равно/неравно и регулярками, подошло/не подошло</p>
+<p><code>http_requests_total{environment=~&quot;staging|testing|development&quot;,method!=&quot;GET&quot;}</code></p>
+<h2 id="тип-range-vector">Тип <code>range vector</code></h2>
+<p>Массив из [множества значений за единицу времени]. Это уже сложнее. Оно возникает, когда мы для каждой точки просим &quot;еще несколько предыдущих&quot;. Это нужно работы разных функций: чтобы считать разницы, скорости изменений и тд, для каждой точки надо иметь хотя бы две точки - текущую и предыдущую.</p>
+<ul>
+<li>больше интервал - более гладкий результат, видно тренд</li>
+<li>меньше интервал - более шумный результат, видно пики</li>
+<li>слишком малый и не захватили минимум две точки - нет результата</li>
+</ul>
+<h2 id="селекторы-range-vetcor-ов">Селекторы range vetcor-ов</h2>
+<p>Все то же самое только добавляем интервал в квадратных скобках в конце. По сути этой штукой можно тюнить степень &quot;сглаживания&quot; или &quot;разрешение&quot; (точность) в каком-то смысле.</p>
+<p><code>http_requests_total{job=&quot;prometheus&quot;}[5m]</code></p>
+<h2 id="offset">Offset</h2>
+<p>Если хотим запросить данные относительно текущего времени назад, например чтобы сравнить с прошлым днем</p>
+<p><code>http_requests_total offset 1d</code></p>
+<h2 id="вложенные-запросы">Вложенные запросы</h2>
+<p>Можно, но пропустим</p>
+<h2 id="операторы-группировки">Операторы, группировки</h2>
+<p><strong>Это все про instant векторы</strong></p>
+<p>Обычная арифметика и логика. Есть unless (логическое дополнение). Оперировать можно числами и векторами, т.е. пересечь два вектора, сравнить с числом, ...</p>
+<p>Есть 1 to 1, 1 to N, N to 1. Но это все сложности.</p>
+<h2 id="агрегация">Агрегация</h2>
+<p><strong>Это все про instant векторы</strong></p>
+<pre><code class="language-python"><div>sum(http_requests_total)
+
+sum by (application, group) (http_requests_total)
+sum without (instance) (http_requests_total)
+
+sum (http_requests_total) by (application, group)
+sum (http_requests_total) without (instance)
+</div></code></pre>
+<p>sum, max, min, avg, group, count, topk, bottomk, quantile</p>
+<h1 id="функции">Функции</h1>
+<p><strong>Функции бывают для instant и range векторов</strong></p>
+<h2 id="raterv">rate(rv)</h2>
+<pre><code class="language-python"><div>rate(http_requests_total{job=<span class="hljs-string">&quot;api-server&quot;</span>}[<span class="hljs-number">5</span>m])
+</div></code></pre>
+<ul>
+<li>считает скорость прироста В СЕКУНДУ (запросов/сек)</li>
+<li>подходит только для счетчиков</li>
+<li>учитывает сбросы счетчика на 0</li>
+<li>экстраполируется</li>
+<li>есть irate для резко прыгающих счетчиков</li>
+</ul>
+<h2 id="increaserv">increase(rv)</h2>
+<pre><code class="language-python"><div>increase(http_requests_total{job=<span class="hljs-string">&quot;api-server&quot;</span>}[<span class="hljs-number">5</span>m])
+</div></code></pre>
+<ul>
+<li>считает прирост за интервал (сколько запросов пришло)</li>
+<li>подходит только для счетчиков</li>
+<li>учитывает сбросы счетчика на 0</li>
+<li>экстраполируется (поэтому бывают дроби даже когда прирост целый)</li>
+<li>по сути это сахар для <code>rate() * интервал</code></li>
+<li>не надо использовать, лучше <code>rate</code></li>
+</ul>
+<p><code>rate(metric[1h]) == increase(metric[1h])/3600</code></p>
+<h2 id="deltarv">delta(rv)</h2>
+<pre><code class="language-python"><div>delta(ram_free{host=<span class="hljs-string">&quot;postgresql&quot;</span>}[<span class="hljs-number">5</span>m])
+</div></code></pre>
+<ul>
+<li>считает разницу за интервал между первым и последним значением</li>
+<li>экстраполируется (поэтому бывают дроби даже когда прирост целый)</li>
+<li>только для gauge</li>
+</ul>
+<h2 id="derivrv">deriv(rv)</h2>
+<pre><code class="language-python"><div>deriv(ram_free{host=<span class="hljs-string">&quot;postgresql&quot;</span>}[<span class="hljs-number">5</span>m])
+</div></code></pre>
+<ul>
+<li>считает производную в &quot;единицах в секунду&quot; (запросов / сек)</li>
+<li>только для gauge</li>
+<li>это типа rate но не учитывает сброс, зато переваривает уменьшения</li>
+</ul>
+<h2 id="histogram_quantileiv-instant-vector">histogram_quantile(iv) <em>(instant vector!)</em></h2>
+<pre><code class="language-python"><div>histogram_quantile(<span class="hljs-number">0.95</span>, rate(http_request_duration_seconds_bucket[<span class="hljs-number">5</span>m]))
+histogram_quantile(<span class="hljs-number">0.95</span>, sum by (url, le) (rate(http_request_duration_seconds_bucket[<span class="hljs-number">5</span>m])))
+</div></code></pre>
+<ul>
+<li>считает квантили</li>
+<li>только для гистограммы</li>
+</ul>
+<h2 id="aggr_over_timerv">aggr_over_time(rv)</h2>
+<pre><code class="language-python"><div>avg_over_time
+min_over_time
+max_over_time
+sum_over_time
+count_over_time
+quantile_over_time
+stddev_over_time (отклонение)
+stdvar_over_time (дисперсия)
+</div></code></pre>
+<h1 id="агрегация-и-вывод-на-график">агрегация и вывод на график</h1>
+<p>производная: <code>(f(x+0.1) - f(x)) / 0.1</code></p>
+<p>перцентили (0.5 это медиана кстати)</p>
+<h1 id="grafana">grafana</h1>
+<p>переменные
+аннотации
+перекраска рядов</p>
+
+    </body>
+    </html>
